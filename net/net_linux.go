@@ -407,26 +407,7 @@ func ConnectionsPid(kind string, pid int32) ([]ConnectionStat, error) {
 }
 
 func ConnectionsPidWithContext(ctx context.Context, kind string, pid int32) ([]ConnectionStat, error) {
-	tmap, ok := netConnectionKindMap[kind]
-	if !ok {
-		return nil, fmt.Errorf("invalid kind, %s", kind)
-	}
-	root := common.HostProc()
-	var err error
-	var inodes map[string][]inodeMap
-	if pid == 0 {
-		inodes, err = getProcInodesAll(root, 0)
-	} else {
-		inodes, err = getProcInodes(root, pid, 0)
-		if len(inodes) == 0 {
-			// no connection for the pid
-			return []ConnectionStat{}, nil
-		}
-	}
-	if err != nil {
-		return nil, fmt.Errorf("cound not get pid(s), %d: %s", pid, err)
-	}
-	return statsFromInodes(root, pid, tmap, inodes)
+	return ConnectionsMaxWithContext(ctx, kind, 0)
 }
 
 // Return up to `max` network connections opened by a process.
@@ -452,7 +433,7 @@ func ConnectionsPidMaxWithContext(ctx context.Context, kind string, pid int32, m
 		}
 	}
 	if err != nil {
-		return nil, fmt.Errorf("cound not get pid(s), %d", pid)
+		return nil, fmt.Errorf("cound not get pid(s), %d: %s", pid, err)
 	}
 	return statsFromInodes(root, pid, tmap, inodes)
 }
