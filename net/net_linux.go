@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 
+	sigar "github.com/elastic/gosigar/sys/linux"
 	"github.com/shirou/gopsutil/internal/common"
 )
 
@@ -365,6 +366,10 @@ var netConnectionKindMap = map[string][]netConnectionKindType{
 	"inet6": {kindTCP6, kindUDP6},
 }
 
+var familyKindMap = map[string]sigar.AddressFamily{
+	"all": sigar.AF_INET,
+}
+
 type inodeMap struct {
 	pid int32
 	fd  uint32
@@ -407,7 +412,7 @@ func ConnectionsPid(kind string, pid int32) ([]ConnectionStat, error) {
 }
 
 func ConnectionsPidWithContext(ctx context.Context, kind string, pid int32) ([]ConnectionStat, error) {
-	return ConnectionsMaxWithContext(ctx, kind, 0)
+	return ConnectionsPidMaxWithContext(ctx, kind, pid, 0)
 }
 
 // Return up to `max` network connections opened by a process.
@@ -416,12 +421,17 @@ func ConnectionsPidMax(kind string, pid int32, max int) ([]ConnectionStat, error
 }
 
 func ConnectionsPidMaxWithContext(ctx context.Context, kind string, pid int32, max int) ([]ConnectionStat, error) {
+	ret, err := sigarLookup(ctx, kind)
+	if err != nil {
+		return ret, nil
+	}
+	// legacy/backup implementation
 	tmap, ok := netConnectionKindMap[kind]
 	if !ok {
 		return nil, fmt.Errorf("invalid kind, %s", kind)
 	}
 	root := common.HostProc()
-	var err error
+
 	var inodes map[string][]inodeMap
 	if pid == 0 {
 		inodes, err = getProcInodesAll(root, max)
@@ -435,7 +445,54 @@ func ConnectionsPidMaxWithContext(ctx context.Context, kind string, pid int32, m
 	if err != nil {
 		return nil, fmt.Errorf("cound not get pid(s), %d: %s", pid, err)
 	}
+
 	return statsFromInodes(root, pid, tmap, inodes)
+}
+
+func sigarLookup(ctx context.Context, kind string) ([]ConnectionStat, error) {
+	tmap1, ok := familyKindMap[kind]
+	if !ok {
+		return nil, fmt.Errorf("invalid kind, %s", kind)
+	}
+	msg := sigar.NewInetDiagReqV2(tmap1)
+	// TODO: set correct sequence
+	// msg.Header.Seq =
+	msgs, err := sigar.NetlinkInetDiag(msg)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't send netlink message: %v", err)
+	}
+	var cs []ConnectionStat
+	for _, diag := range msgs {
+		//type InetDiagMsg struct {
+		//	Family  uint8 // Address family.
+		//	State   uint8 // TCP State
+		//	Timer   uint8
+		//	Retrans uint8
+		//
+		//	ID InetDiagSockID
+		//
+		//	Expires uint32
+		//	RQueue  uint32 // Recv-Q
+		//	WQueue  uint32 // Send-Q
+		//	UID     uint32 // UID
+		//	Inode   uint32 // Inode of socket.
+		//}
+		conn := ConnectionStat{
+			//Fd:     c.fd,
+			Family: uint32(diag.Family),
+			// Breaking change: this will always be netlink; for backwards compat we would have to loop over previous
+			// tmap and use that info
+			Type:   syscall.AF_NETLINK,
+			Laddr:  Addr{diag.SrcIP().String(), uint32(diag.SrcPort())},
+			Raddr:  Addr{diag.DstIP().String(), uint32(diag.DstPort())},
+			Status: sigar.TCPState(diag.State).String(),
+			// todo: I believe this is the UID of the req and not the pid
+			Uids: []int32{int32(diag.UID)},
+			//Pid:    c.pid,
+		}
+		cs = append(cs, conn)
+	}
+	return cs, nil
 }
 
 func statsFromInodes(root string, pid int32, tmap []netConnectionKindType, inodes map[string][]inodeMap) ([]ConnectionStat, error) {
